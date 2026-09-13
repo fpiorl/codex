@@ -131,6 +131,7 @@ members = [
     "utils/approval-presets",
     "utils/oss",
     "utils/output-truncation",
+    "utils/privacy-filter",
     "utils/path-utils",
     "utils/plugins",
     "utils/fuzzy-match",
@@ -286,6 +287,7 @@ codex-utils-image = { path = "utils/image" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
 codex-utils-oss = { path = "utils/oss" }
 codex-utils-output-truncation = { path = "utils/output-truncation" }
+codex-utils-privacy-filter = { path = "utils/privacy-filter" }
 codex-utils-path = { path = "utils/path-utils" }
 codex-utils-path-uri = { path = "utils/path-uri" }
 codex-utils-plugins = { path = "utils/plugins" }

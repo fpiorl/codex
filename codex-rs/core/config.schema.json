@@ -3299,6 +3299,42 @@
       ],
       "type": "object"
     },
+    "PrivacyRuleToml": {
+      "description": "One privacy substitution.",
+      "properties": {
+        "placeholder": {
+          "description": "What the model sees instead. Pick something the model will echo back verbatim, e.g. `company-a.example` or `Company A`.",
+          "type": "string"
+        },
+        "real": {
+          "description": "The real value (a domain, company name, product name, ...).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "placeholder",
+        "real"
+      ],
+      "type": "object"
+    },
+    "PrivacyToml": {
+      "description": "Privacy filter settings.\n\nEvery string sent to the model has each rule's `real` value replaced by its `placeholder`, and every string received from the model has placeholders mapped back to the real values. Matching is case-insensitive and applies to substrings, so a rule for `acme.com` also covers `api.acme.com`.",
+      "properties": {
+        "enabled": {
+          "description": "Master switch; defaults to `true` when rules are present.",
+          "type": "boolean"
+        },
+        "rules": {
+          "default": [],
+          "description": "Substitution rules, e.g. `{ real = \"acme.com\", placeholder = \"company-a.example\" }`.",
+          "items": {
+            "$ref": "#/definitions/PrivacyRuleToml"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ProfileTui": {
       "additionalProperties": false,
       "description": "TUI settings supported inside a named profile.",
@@ -7020,6 +7056,15 @@
       "default": {},
       "description": "User-level plugin config entries keyed by plugin name.",
       "type": "object"
+    },
+    "privacy": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/PrivacyToml"
+        }
+      ],
+      "default": null,
+      "description": "Bidirectional privacy filter applied at the model API boundary."
     },
     "profile": {
       "description": "Profile to use from the `profiles` map.",

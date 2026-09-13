@@ -3038,6 +3038,7 @@ dependencies = [
  "codex-utils-path",
  "codex-utils-path-uri",
  "codex-utils-plugins",
+ "codex-utils-privacy-filter",
  "codex-utils-pty",
  "codex-utils-redacted-string",
  "codex-utils-stream-parser",
@@ -5027,6 +5028,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "codex-utils-privacy-filter"
+version = "0.0.0"
+dependencies = [
+ "codex-protocol",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

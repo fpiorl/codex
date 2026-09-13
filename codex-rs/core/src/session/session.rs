@@ -1599,6 +1599,7 @@ impl Session {
                     attestation_provider,
                     config.http_client_factory(),
                 )
+                .with_privacy_filter(config.privacy_filter())
                 .with_free_guardian_enabled(config.free_guardian_enabled())
                 .with_session_context(
                     crate::guardian::prompt_cache_key_override_for_review_session(

@@ -810,6 +810,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        /*privacy_filter*/ None,
     );
 
     let observed = stream
@@ -861,6 +862,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
         test_model_provider(),
+        /*privacy_filter*/ None,
     );
 
     while stream.next().await.is_some() {}
@@ -1082,6 +1084,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        /*privacy_filter*/ None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
@@ -1361,4 +1364,126 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
         None,
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
+}
+
+fn test_privacy_filter() -> Arc<codex_utils_privacy_filter::PrivacyFilter> {
+    Arc::new(codex_utils_privacy_filter::PrivacyFilter::new([
+        codex_utils_privacy_filter::PrivacyRule {
+            real: "acme.com".to_string(),
+            placeholder: "company-a.example".to_string(),
+        },
+        codex_utils_privacy_filter::PrivacyRule {
+            real: "Acme Corp".to_string(),
+            placeholder: "Company A".to_string(),
+        },
+    ]))
+}
+
+#[tokio::test]
+async fn privacy_filter_redacts_outbound_request() -> anyhow::Result<()> {
+    let client =
+        test_model_client(SessionSource::Cli).with_privacy_filter(Some(test_privacy_filter()));
+    let mut prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Fix the login page on https://app.acme.com for Acme Corp".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        ..Default::default()
+    };
+    prompt.base_instructions.text = "You work for Acme Corp.".to_string();
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        codex_protocol::config_types::ReasoningSummary::None,
+        /*service_tier*/ None,
+        &responses_metadata,
+    )?;
+    assert_eq!(request.instructions, "You work for Company A.");
+    let serialized = serde_json::to_string(&request)?;
+    assert!(
+        !serialized.contains("acme"),
+        "real values leaked: {serialized}"
+    );
+    assert!(serialized.contains("https://app.company-a.example"));
+    assert!(serialized.contains("Company A"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn privacy_filter_restores_inbound_stream() -> anyhow::Result<()> {
+    let api_stream = futures::stream::iter([
+        Ok(ResponseEvent::OutputTextDelta("Open comp".to_string())),
+        Ok(ResponseEvent::OutputTextDelta(
+            "any-a.example for Company A".to_string(),
+        )),
+        Ok(ResponseEvent::OutputItemDone(output_message(
+            "1",
+            "Open company-a.example for Company A",
+        ))),
+        Ok(ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+            id: None,
+            name: "shell".to_string(),
+            namespace: None,
+            arguments: "{\"command\":\"curl company-a.example\"}".to_string(),
+            encrypted_function_args: None,
+            call_id: "call_1".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        })),
+        Ok(ResponseEvent::Completed {
+            response_id: "resp_1".to_string(),
+            token_usage: None,
+            usage_metadata: None,
+            end_turn: Some(true),
+        }),
+    ]);
+    let (mut stream, _) = super::map_response_events(
+        /*upstream_request_id*/ None,
+        api_stream,
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+        Some(test_privacy_filter()),
+    );
+
+    let mut text = String::new();
+    let mut final_message = None;
+    let mut arguments = None;
+    while let Some(event) = stream.next().await {
+        match event? {
+            ResponseEvent::OutputTextDelta(delta) => text.push_str(&delta),
+            ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }) => {
+                final_message = content.into_iter().find_map(|item| match item {
+                    ContentItem::OutputText { text } => Some(text),
+                    _ => None,
+                });
+            }
+            ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
+                arguments: args, ..
+            }) => arguments = Some(args),
+            _ => {}
+        }
+    }
+    assert_eq!(text, "Open acme.com for Acme Corp");
+    assert_eq!(
+        final_message.as_deref(),
+        Some("Open acme.com for Acme Corp")
+    );
+    assert_eq!(
+        arguments.as_deref(),
+        Some("{\"command\":\"curl acme.com\"}")
+    );
+    Ok(())
 }

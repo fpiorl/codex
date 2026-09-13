@@ -233,6 +233,11 @@ impl ResponsesApiTools {
     pub(crate) fn as_raw_value(&self) -> &RawValue {
         &self.0
     }
+
+    /// The tool list as its raw JSON text.
+    pub fn as_raw_value_str(&self) -> &str {
+        self.0.get()
+    }
 }
 
 impl From<Arc<RawValue>> for ResponsesApiTools {

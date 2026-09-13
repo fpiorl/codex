@@ -95,6 +95,8 @@ use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::create_tools_json_for_responses_api;
 use codex_tools::create_tools_json_for_responses_lite;
 use codex_tools::create_tools_raw_json_for_responses_api;
+use codex_utils_privacy_filter::PrivacyFilter;
+use codex_utils_privacy_filter::StreamRestorers;
 use eventsource_stream::Event;
 use eventsource_stream::EventStreamError;
 use futures::StreamExt;
@@ -251,6 +253,8 @@ pub struct ModelClient {
     free_guardian_enabled: bool,
     event_sender: Option<Sender<ProtocolEvent>>,
     http_client_factory: HttpClientFactory,
+    /// Bidirectional privacy filter applied to every request and response.
+    privacy_filter: Option<Arc<PrivacyFilter>>,
 }
 
 /// A turn-scoped streaming session created from a [`ModelClient`].
@@ -476,6 +480,7 @@ impl ModelClient {
             free_guardian_enabled: false,
             event_sender: None,
             http_client_factory,
+            privacy_filter: None,
         }
     }
 
@@ -522,6 +527,17 @@ impl ModelClient {
     ///
     /// This constructor does not perform network I/O itself; the session opens a websocket lazily
     /// when the first stream request is issued.
+    /// Attach a privacy filter. Outbound requests are redacted and inbound
+    /// stream events are restored using the same rule set.
+    pub fn with_privacy_filter(mut self, privacy_filter: Option<Arc<PrivacyFilter>>) -> Self {
+        self.privacy_filter = privacy_filter;
+        self
+    }
+
+    pub fn privacy_filter(&self) -> Option<Arc<PrivacyFilter>> {
+        self.privacy_filter.clone()
+    }
+
     pub fn new_session(&self) -> ModelClientSession {
         let auth_owner_generation = self.auth_owner_generation();
         let mut websocket_session = self.take_cached_websocket_session();
@@ -895,6 +911,10 @@ impl ModelClient {
             text,
             client_metadata: Some(responses_metadata.client_metadata()),
             access_programs: None,
+        };
+        let request = match self.privacy_filter.as_deref() {
+            Some(filter) => redact_responses_request(filter, request),
+            None => request,
         };
         Ok(request)
     }
@@ -1594,6 +1614,7 @@ impl ModelClientSession {
                         request_session_telemetry,
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
+                        self.client.privacy_filter.clone(),
                     );
                     return Ok(stream);
                 }
@@ -1865,6 +1886,7 @@ impl ModelClientSession {
                 request_session_telemetry,
                 inference_trace_attempt,
                 Arc::clone(&self.client.state.provider),
+                self.client.privacy_filter.clone(),
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2098,6 +2120,7 @@ fn map_response_stream(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
+    privacy_filter: Option<Arc<PrivacyFilter>>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -2113,6 +2136,7 @@ fn map_response_stream(
         session_telemetry,
         inference_trace_attempt,
         provider,
+        privacy_filter,
     )
 }
 
@@ -2122,6 +2146,7 @@ fn map_response_events<S>(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
+    privacy_filter: Option<Arc<PrivacyFilter>>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -2141,6 +2166,7 @@ where
         let mut items_added: Vec<ResponseItem> = Vec::new();
         let (request_start, mut ttft_ms) = (Instant::now(), None);
         let mut api_stream = api_stream;
+        let mut stream_restorers = StreamRestorers::default();
         let upstream_request_id = upstream_request_id.as_deref();
         if let Some(upstream_request_id) = upstream_request_id {
             feedback_tags!(last_model_request_id = upstream_request_id);
@@ -2159,6 +2185,24 @@ where
             };
             let Some(event) = event else {
                 break;
+            };
+            let event = match privacy_filter.as_deref() {
+                Some(filter) => {
+                    let (flushed, event) =
+                        restore_response_event(filter, &mut stream_restorers, event);
+                    for flushed_event in flushed {
+                        if tx_event.send(Ok(flushed_event)).await.is_err() {
+                            inference_trace_attempt.record_cancelled(
+                                STREAM_DROPPED_REASON,
+                                upstream_request_id,
+                                &items_added,
+                            );
+                            return;
+                        }
+                    }
+                    event
+                }
+                None => event,
             };
             match event {
                 Ok(ResponseEvent::OutputItemDone(item)) => {
@@ -2264,6 +2308,165 @@ where
         },
         rx_last_response,
     )
+}
+
+/// Keys used for the per-stream text delta restorers.
+const TEXT_DELTA_RESTORER_KEY: &str = "output_text";
+const REASONING_SUMMARY_RESTORER_KEY: &str = "reasoning_summary";
+const REASONING_CONTENT_RESTORER_KEY: &str = "reasoning_content";
+
+/// Replace real values with placeholders in every string the model will see.
+fn redact_responses_request(
+    filter: &PrivacyFilter,
+    mut request: ResponsesApiRequest,
+) -> ResponsesApiRequest {
+    filter.redact_in_place(&mut request.instructions);
+    filter.redact_items(&mut request.input);
+    if let Some(tools) = request.tools.take() {
+        request.tools = Some(redact_tools(filter, tools));
+    }
+    request
+}
+
+fn redact_tools(
+    filter: &PrivacyFilter,
+    tools: codex_api::ResponsesApiTools,
+) -> codex_api::ResponsesApiTools {
+    let raw = tools.as_raw_value_str();
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return tools;
+    };
+    if !filter.redact_value(&mut value) {
+        return tools;
+    }
+    match serde_json::value::to_raw_value(&value) {
+        Ok(raw) => codex_api::ResponsesApiTools::from(Arc::from(raw)),
+        Err(_) => tools,
+    }
+}
+
+/// Map placeholders back to real values on everything coming from the model.
+///
+/// Streaming deltas are routed through [`StreamRestorers`] so a placeholder
+/// split across two deltas is still restored; any text held back for that
+/// reason is flushed (returned as extra events) before the item completes.
+fn restore_response_event(
+    filter: &PrivacyFilter,
+    restorers: &mut StreamRestorers,
+    event: std::result::Result<ResponseEvent, ApiError>,
+) -> (
+    Vec<ResponseEvent>,
+    std::result::Result<ResponseEvent, ApiError>,
+) {
+    let mut flushed = Vec::new();
+    let event = match event {
+        Ok(ResponseEvent::OutputItemDone(mut item)) => {
+            flushed.extend(flush_all_restorers(restorers));
+            filter.restore_item(&mut item);
+            Ok(ResponseEvent::OutputItemDone(item))
+        }
+        Ok(ResponseEvent::OutputItemAdded(mut item)) => {
+            filter.restore_item(&mut item);
+            Ok(ResponseEvent::OutputItemAdded(item))
+        }
+        Ok(ResponseEvent::OutputTextDelta(delta)) => {
+            let restored = restorers.push(filter, TEXT_DELTA_RESTORER_KEY, &delta);
+            Ok(ResponseEvent::OutputTextDelta(restored))
+        }
+        Ok(ResponseEvent::ToolCallInputDelta {
+            item_id,
+            call_id,
+            delta,
+        }) => {
+            let key = format!("tool_call_input:{item_id}");
+            let restored = restorers.push(filter, &key, &delta);
+            Ok(ResponseEvent::ToolCallInputDelta {
+                item_id,
+                call_id,
+                delta: restored,
+            })
+        }
+        Ok(ResponseEvent::ReasoningSummaryDelta {
+            delta,
+            summary_index,
+        }) => {
+            let key = format!("{REASONING_SUMMARY_RESTORER_KEY}:{summary_index}");
+            let restored = restorers.push(filter, &key, &delta);
+            Ok(ResponseEvent::ReasoningSummaryDelta {
+                delta: restored,
+                summary_index,
+            })
+        }
+        Ok(ResponseEvent::ReasoningSummaryDone {
+            item_id,
+            text,
+            summary_index,
+        }) => {
+            let key = format!("{REASONING_SUMMARY_RESTORER_KEY}:{summary_index}");
+            if let Some(tail) = restorers.flush(&key) {
+                flushed.push(ResponseEvent::ReasoningSummaryDelta {
+                    delta: tail,
+                    summary_index,
+                });
+            }
+            Ok(ResponseEvent::ReasoningSummaryDone {
+                item_id,
+                text: filter.restore(&text),
+                summary_index,
+            })
+        }
+        Ok(ResponseEvent::ReasoningContentDelta {
+            delta,
+            content_index,
+        }) => {
+            let key = format!("{REASONING_CONTENT_RESTORER_KEY}:{content_index}");
+            let restored = restorers.push(filter, &key, &delta);
+            Ok(ResponseEvent::ReasoningContentDelta {
+                delta: restored,
+                content_index,
+            })
+        }
+        Ok(ResponseEvent::Completed { .. }) => {
+            flushed.extend(flush_all_restorers(restorers));
+            event
+        }
+        other => other,
+    };
+    (flushed, event)
+}
+
+fn flush_all_restorers(restorers: &mut StreamRestorers) -> Vec<ResponseEvent> {
+    restorers
+        .flush_all()
+        .into_iter()
+        .filter_map(|(key, text)| restorer_key_to_delta(&key, text))
+        .collect()
+}
+
+fn restorer_key_to_delta(key: &str, text: String) -> Option<ResponseEvent> {
+    if key == TEXT_DELTA_RESTORER_KEY {
+        return Some(ResponseEvent::OutputTextDelta(text));
+    }
+    if let Some(item_id) = key.strip_prefix("tool_call_input:") {
+        return Some(ResponseEvent::ToolCallInputDelta {
+            item_id: item_id.to_string(),
+            call_id: None,
+            delta: text,
+        });
+    }
+    if let Some(index) = key.strip_prefix(&format!("{REASONING_SUMMARY_RESTORER_KEY}:")) {
+        return Some(ResponseEvent::ReasoningSummaryDelta {
+            delta: text,
+            summary_index: index.parse().ok()?,
+        });
+    }
+    if let Some(index) = key.strip_prefix(&format!("{REASONING_CONTENT_RESTORER_KEY}:")) {
+        return Some(ResponseEvent::ReasoningContentDelta {
+            delta: text,
+            content_index: index.parse().ok()?,
+        });
+    }
+    None
 }
 
 /// Handles a 401 response by optionally refreshing ChatGPT tokens once.

@@ -28,6 +28,7 @@ use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
+use codex_config::config_toml::PrivacyRuleToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
@@ -133,6 +134,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
+use codex_utils_privacy_filter::PrivacyFilter;
+use codex_utils_privacy_filter::PrivacyRule;
 use http::HeaderValue;
 use rmcp::model::ElicitationCapability;
 use rmcp::model::FormElicitationCapability;
@@ -679,6 +682,10 @@ pub struct Config {
     /// `# Policy Configuration` section rather than replacing the whole
     /// guardian developer prompt.
     pub guardian_policy_config: Option<String>,
+
+    /// Privacy substitution rules applied at the model API boundary
+    /// (see `[privacy]` in config.toml). Empty when the filter is disabled.
+    pub privacy_rules: Vec<PrivacyRuleToml>,
 
     /// Whether to inject the `<permissions instructions>` developer block.
     pub include_permissions_instructions: bool,
@@ -1630,6 +1637,22 @@ impl Config {
     }
 
     /// Creates the HTTP client factory resolved from the effective feature configuration.
+    /// Compiled privacy filter, or `None` when no rules are configured.
+    pub fn privacy_filter(&self) -> Option<Arc<PrivacyFilter>> {
+        if self.privacy_rules.is_empty() {
+            return None;
+        }
+        let filter = PrivacyFilter::new(self.privacy_rules.iter().map(|rule| PrivacyRule {
+            real: rule.real.clone(),
+            placeholder: rule.placeholder.clone(),
+        }));
+        if filter.is_empty() {
+            None
+        } else {
+            Some(Arc::new(filter))
+        }
+    }
+
     pub fn http_client_factory(&self) -> HttpClientFactory {
         let outbound_proxy_policy = if self.respect_system_proxy {
             OutboundProxyPolicy::RespectSystemProxy
@@ -4254,6 +4277,12 @@ impl Config {
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
             guardian_policy_config,
+            privacy_rules: cfg
+                .privacy
+                .as_ref()
+                .filter(|privacy| privacy.enabled.unwrap_or(true))
+                .map(|privacy| privacy.rules.clone())
+                .unwrap_or_default(),
             model_reasoning_effort: cfg.model_reasoning_effort,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
             model_reasoning_summary: cfg.model_reasoning_summary,

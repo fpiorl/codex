@@ -471,6 +471,10 @@ pub struct ConfigToml {
     /// Lifecycle hooks configured inline in TOML plus user-level overrides.
     pub hooks: Option<HooksToml>,
 
+    /// Bidirectional privacy filter applied at the model API boundary.
+    #[serde(default)]
+    pub privacy: Option<PrivacyToml>,
+
     /// User-level plugin config entries keyed by plugin name.
     #[serde(default)]
     pub plugins: HashMap<String, PluginConfig>,
@@ -547,6 +551,31 @@ pub enum ThreadStoreToml {
     InMemory {
         id: String,
     },
+}
+
+/// Privacy filter settings.
+///
+/// Every string sent to the model has each rule's `real` value replaced by its
+/// `placeholder`, and every string received from the model has placeholders
+/// mapped back to the real values. Matching is case-insensitive and applies to
+/// substrings, so a rule for `acme.com` also covers `api.acme.com`.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+pub struct PrivacyToml {
+    /// Master switch; defaults to `true` when rules are present.
+    pub enabled: Option<bool>,
+    /// Substitution rules, e.g. `{ real = "acme.com", placeholder = "company-a.example" }`.
+    #[serde(default)]
+    pub rules: Vec<PrivacyRuleToml>,
+}
+
+/// One privacy substitution.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+pub struct PrivacyRuleToml {
+    /// The real value (a domain, company name, product name, ...).
+    pub real: String,
+    /// What the model sees instead. Pick something the model will echo back
+    /// verbatim, e.g. `company-a.example` or `Company A`.
+    pub placeholder: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
