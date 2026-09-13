@@ -133,7 +133,7 @@ fn generated_placeholders_follow_the_real_value_shape() {
     // Works as a rule end to end.
     let f = PrivacyFilter::new([PrivacyRule {
         real: "google.com".into(),
-        placeholder: domain.clone(),
+        placeholder: domain,
     }]);
     assert_eq!(
         f.restore(&f.redact("see docs.google.com")),
