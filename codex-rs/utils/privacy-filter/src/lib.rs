@@ -367,6 +367,43 @@ impl StreamRestorers {
     }
 }
 
+/// Neutral words used to build random placeholders.
+const PLACEHOLDER_WORDS: &[&str] = &[
+    "amber", "birch", "cedar", "delta", "ember", "fjord", "gale", "harbor", "iris", "jade",
+    "kestrel", "lumen", "maple", "nova", "opal", "pearl", "quartz", "ridge", "sable", "tidal",
+    "umber", "vale", "willow", "xenon", "yarrow", "zephyr", "aspen", "basalt", "cobalt", "dune",
+    "echo", "flint", "granite", "heron", "indigo", "juniper", "koral", "lotus", "meadow", "nimbus",
+];
+
+/// Generate a random placeholder for `real`.
+///
+/// Values that look like a domain (contain a dot, no whitespace) become a
+/// fake `<word>-<word>.example` domain so the model still treats them as a
+/// host. Everything else becomes a CamelCase fake name. A random suffix keeps
+/// two sessions from ever picking the same placeholder.
+pub fn generate_placeholder(real: &str) -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+
+    let seed = RandomState::new().hash_one(real)
+        ^ RandomState::new().hash_one(std::time::SystemTime::now());
+    let pick = |shift: u32| PLACEHOLDER_WORDS[((seed >> shift) as usize) % PLACEHOLDER_WORDS.len()];
+    let suffix = (seed >> 48) % 900 + 100;
+    let looks_like_domain = real.contains('.') && !real.chars().any(char::is_whitespace);
+    if looks_like_domain {
+        format!("{}-{}{}.example", pick(0), pick(16), suffix)
+    } else {
+        let capitalize = |word: &str| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        };
+        format!("{}{}{}", capitalize(pick(0)), capitalize(pick(16)), suffix)
+    }
+}
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;

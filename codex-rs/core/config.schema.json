@@ -3303,7 +3303,7 @@
       "description": "One privacy substitution.",
       "properties": {
         "placeholder": {
-          "description": "What the model sees instead. Pick something the model will echo back verbatim, e.g. `company-a.example` or `Company A`.",
+          "description": "What the model sees instead. Pick something the model will echo back verbatim, e.g. `company-a.example` or `Company A`. When omitted, a random placeholder is generated once per session (a fake `.example` domain when `real` looks like a domain, a fake name otherwise).",
           "type": "string"
         },
         "real": {
@@ -3312,7 +3312,6 @@
         }
       },
       "required": [
-        "placeholder",
         "real"
       ],
       "type": "object"

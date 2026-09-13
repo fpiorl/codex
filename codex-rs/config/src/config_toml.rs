@@ -574,8 +574,10 @@ pub struct PrivacyRuleToml {
     /// The real value (a domain, company name, product name, ...).
     pub real: String,
     /// What the model sees instead. Pick something the model will echo back
-    /// verbatim, e.g. `company-a.example` or `Company A`.
-    pub placeholder: String,
+    /// verbatim, e.g. `company-a.example` or `Company A`. When omitted, a
+    /// random placeholder is generated once per session (a fake `.example`
+    /// domain when `real` looks like a domain, a fake name otherwise).
+    pub placeholder: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

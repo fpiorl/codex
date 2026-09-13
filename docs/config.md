@@ -36,6 +36,11 @@ placeholder = "company-a.example"
 [[privacy.rules]]
 real = "Acme Corp"
 placeholder = "Company A"
+
+# No placeholder: a random one is generated for each session, e.g.
+# `cedar-nova417.example` for a domain or `EmberRidge233` for a name.
+[[privacy.rules]]
+real = "internal-tool.acme.com"
 ```
 
 Notes:
@@ -49,4 +54,9 @@ Notes:
 - Pick placeholders the model is likely to echo verbatim (a fake domain, a
   short capitalised name). Avoid placeholders that also appear in your
   code or docs for unrelated reasons.
-- The substitution is deterministic, so prompt caching keeps working.
+- The substitution is deterministic within a session, so prompt caching keeps
+  working. Omitting `placeholder` gives you a fresh random placeholder per
+  session, which stops the provider from correlating sessions by placeholder.
+  Placeholders are not rotated per request on purpose: that would defeat prompt
+  caching on every call without adding privacy, since each request already
+  carries the whole conversation.

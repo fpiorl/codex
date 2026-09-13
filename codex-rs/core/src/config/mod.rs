@@ -1638,13 +1638,24 @@ impl Config {
 
     /// Creates the HTTP client factory resolved from the effective feature configuration.
     /// Compiled privacy filter, or `None` when no rules are configured.
+    ///
+    /// Rules without an explicit placeholder get a random one generated here,
+    /// so calling this once per session yields session-scoped placeholders.
     pub fn privacy_filter(&self) -> Option<Arc<PrivacyFilter>> {
         if self.privacy_rules.is_empty() {
             return None;
         }
-        let filter = PrivacyFilter::new(self.privacy_rules.iter().map(|rule| PrivacyRule {
-            real: rule.real.clone(),
-            placeholder: rule.placeholder.clone(),
+        let filter = PrivacyFilter::new(self.privacy_rules.iter().map(|rule| {
+            PrivacyRule {
+                real: rule.real.clone(),
+                placeholder: rule
+                    .placeholder
+                    .clone()
+                    .filter(|placeholder| !placeholder.is_empty())
+                    .unwrap_or_else(|| {
+                        codex_utils_privacy_filter::generate_placeholder(&rule.real)
+                    }),
+            }
         }));
         if filter.is_empty() {
             None

@@ -118,3 +118,34 @@ fn stream_restorer_handles_placeholder_at_end_of_delta() {
     out.push_str(&r.flush());
     assert_eq!(out, "see Acme Corp today");
 }
+
+#[test]
+fn generated_placeholders_follow_the_real_value_shape() {
+    let domain = generate_placeholder("google.com");
+    assert!(domain.ends_with(".example"), "{domain}");
+    assert!(!domain.contains(' '));
+    let name = generate_placeholder("Google");
+    assert!(
+        name.chars().next().is_some_and(char::is_uppercase),
+        "{name}"
+    );
+    assert!(!name.contains('.'));
+    // Works as a rule end to end.
+    let f = PrivacyFilter::new([PrivacyRule {
+        real: "google.com".into(),
+        placeholder: domain.clone(),
+    }]);
+    assert_eq!(
+        f.restore(&f.redact("see docs.google.com")),
+        "see docs.google.com"
+    );
+    assert!(!f.redact("see docs.google.com").contains("google"));
+}
+
+#[test]
+fn generated_placeholders_differ_between_calls() {
+    let a = generate_placeholder("google.com");
+    let b = generate_placeholder("google.com");
+    let c = generate_placeholder("google.com");
+    assert!(a != b || b != c, "three draws identical: {a} {b} {c}");
+}
